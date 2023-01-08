@@ -1,0 +1,193 @@
+#################################################
+## Linux Networking Task                       ##
+#################################################
+
+=============
+Net1: 192.168.0.0/24
+Net2: 10.90.29.0/24
+Net3: 10.7.90.0/24
+Net4: 172.16.29.0/24
+
+============ 1. Server_1's interfaces static configuration =========
+// На Server_1 налаштувати статичні адреси на всіх інтерфейсах #
+sudo ip addr add 192.168.200/24 dev enp0s3
+sudo ip addr add 10.90.29.1/24 dev enp0s8
+sudo ip addr add 10.7.90.1/24 dev enp0s9
+ip addr
+sudo ip link set dev enp0s8 up
+sudo ip link set dev enp0s9 up
+
+#For permanent configuration we make changes in /etc/netplan/00-installer.config.yaml:
+sudo nano /etc/netplan/00-installer-config.yaml
+
+network:
+  renderer: NetworkManager
+  ethernets:
+    enp0s3:
+      addresses: [192.168.0.200/24]
+      gateway4: 192.168.0.1
+      dhcp4: no 
+    enp0s8:
+      addresses: [10.90.29.1/24]
+    enp0s9:
+      addresses: [10.7.90.1/24]
+  version: 2
+
+sudo netplan apply
+
+============ 2. DHCP service on Server_1 ===========================
+// На Server_1 налаштувати DHCP сервіс, який буде конфігурувати адреси
+// Int1 Client_1 та Client_2
+
+ls /etc/dhcp/
+sudo nano /etc/dhcp/dhcpd.conf 
+
+default-lease-time 600;
+max-lease-time 7200;
+authoritative;
+subnet 10.90.29.0 netmask 255.255.255.0 {
+    range 10.90.29.2 10.90.29.254;
+    option routers 10.90.29.1;
+}
+subnet 10.7.90.0/24 netmask 255.255.255.0 {
+    range 10.7.90.2 10.7.90.254;
+    option routers 10.7.90.1;
+}
+
+sudo systemctl restart isc-dhcp-server.service
+sudo systemctl status isc-dhcp-server.service
+
+cat /proc/sys/net/ipv4/ip_forward
+
+sudo nano /etc/sysctl.conf
+
+net.ipv4.ip_forward=1 #uncomment this line
+
+============ 3. Connection verification ============================
+// За допомогою команд ping та traceroute перевірити зв`язок між
+// віртуальними машинами. Результат пояснити
+// Налаштувати статичні маршрути для мереж Net2 i Net3 на Wi-Fi роутері
+# Setting up static routes on TP-Link router:
+# go to 192.168.0.1 in Web Browser
+# add:
+
+  # IP address: 10.90.29.0
+  # Netmask: 255.255.255.0
+  # Gateway: 192.168.0.200
+
+  # IP address: 10.7.90.0
+  # Netmask: 255.255.255.0
+  # Gateway: 192.168.0.200
+
+============ 4. Client_1's lo interface configuration and routing ==
+// На віртуальному інтерфейсі lo Client_1 призначити дві ІР адреси за 
+// таким правилом: 172.27.D+10.1/24 та 172.17.D+20.1/24. Налаштувати
+// маршрутизацію таким чином, щоб трафік з Client_1 до 172.17.D+10.1
+// проходив через Server_1, а до 172.17.D+20.1 через Net4. Для перевірки
+// використати traceroute.
+
+# На Client_1:
+sudo ip addr add 172.17.39.1/24 dev lo
+sudo ip addr add 172.17.49.1/24 dev lo
+ip addr sh dev lo
+
+# На Client_2 налаштовуємо маршрутизацію:
+
+ip route # перевірити таблицю маршрутизації
+
+nmcli con mod enp0s3 ipv4.routes "172.17.39.2/24 10.7.90.1"
+nmcli con mod enp0s8 ipv4.routes "172.17.49.2/24 172.16.29.1"
+systemctl restart network
+
+# На Server_1:
+sudo ip route add 172.17.39.0/24 via 10.90.29.2
+
+traceroute 172.17.39.1
+traceroute 172.17.49.1
+
+============ 5. Summarizing and routing ============================
+// Розрахувати спільну адресу та маску (summarizing) адрес 172.17.D+10.1 
+// та 172.17.D+20.1, при чому префікс має бути максимально можливим. 
+
+172.17.39.1    10101100.00010001.00100111.00000001
+172.17.49.1    10101100.00010001.00110001.00000001
+  Summarized into:
+172.17.32.0/19 10101100.00010001.00100000.00000000
+255.255.224.0  11111111.11111111.11100000.00000000
+
+// Видалити маршрути, встановлені на попередньому кроці та замінити їх 
+// об’єднаним маршрутом, якій має проходити через Server_1.
+
+# На Client_2 видаляємо записи з наступних файлів:
+sudo nano /etc/sysconfig/network-scripts/route-enp0s3
+sudo nano /etc/sysconfig/network-scripts/route-enp0s8
+
+mncli con mod enp0s3 ipv4.routes "172.17.32.0/19 10.7.90.1"
+
+# На Server_1:
+sudo ip route del 172.17.39.0/24 via 10.90.29.2
+sudo ip route add 172.17.32.0/19 via 10.90.29.2
+
+# Ha Client_2:
+traceroute 172.17.39.1
+traceroute 172.17.49.1
+
+============ 6. SSH configuration ==================================
+// Налаштувати SSH сервіс таким чином, щоб Client_1 та Client_2 могли 
+// підключатись до Server_1 та один до одного.
+
+# On Server_1:
+sudo systemctl start ssh 
+sudo systemctl status ssh
+
+# On Client_2:
+ssh user@10.7.90.1
+exit
+ssh-keygen #saved as key1
+ssh-copy-id -i key1.pib user@10.7.90.1
+
+# On Server_1 enable public key authentication:
+sudo nano /etc/ssh/sshd_config
+
+# uncomment this line:
+PubkeyAuthentication yes
+PasswordAuthentication no
+
+sudo systemctl restart ssh
+
+# On Client_2 add Server_1 as known host:
+sudo nano /etc/ssh/ssh_config 
+
+Host server
+  User userHostname 10.7.90.1
+  IdentityFile ~/key1
+
+# Check if everything works:
+ssh server
+
+# The same steps should be made for Client_2 to connect to Client_1 and for Client_1
+# to connect to Server_1 (using key2 and key3 accordingly for saving keys)
+
+============ 7. Firewall configuration =============================
+// Налаштуйте на Server_1 firewall таким чином:
+// • Дозволено підключатись через SSH з Client_1 та заборонено з Client_2
+
+sudo iptables _L
+sudo iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+sudo iptables -A INPUT -p tcp -s 10.90.29.2/255.255.255.0 --dport 22 -j ACCEPT
+sudo iptables -A INPUT -p tcp -s 10.7.90.2/255.255.255.0 --dport 22 -j DROP
+
+// • З Client_2 на 172.17.D+10.1 ping проходив, а на 172.17.D+20.1 не проходив
+
+sudo iptables -A FORWARD -p icmp -s 10.7.90.2/255.255.255.255 -d 172.17.39.1/255.255.255.255 -j ACCEPT
+sudo iptables -A FORWARD -p icmp -s 10.7.90.2/255.255.255.255 -d 172.17.49.1/255.255.255.255 -j DROP
+
+sudo apt install iptables-persistent # all routing configurations will be saved permanently
+
+============ 8. NAT service configuration ==========================
+// Якщо в п.3 була налаштована маршрутизація для доступу Client_1 та 
+// Client_2 до мережі Інтернет – видалити відповідні записи. На Server_1 
+// налаштувати NAT сервіс таким чином, щоб з Client_1 та Client_2 проходив 
+// ping в мережу Інтернет.
+sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/8 -j SNAT --to-source 192.168.0.200
+sudo iptables -t nat -L 
